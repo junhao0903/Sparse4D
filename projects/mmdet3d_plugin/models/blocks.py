@@ -162,21 +162,31 @@ class DeformableFeatureAggregation(BaseModule):
             output = torch.cat([output, instance_feature], dim=-1)
         return output
 
+    # 根据instance feature和anchor embedding计算deformable attention的权重
     def _get_weights(self, instance_feature, anchor_embed, metas=None):
+        # 获取batch size和anchor数量
         bs, num_anchor = instance_feature.shape[:2]
+        # 将instance feature和位置编码(anchor embedding)相加作为基础特征
         feature = instance_feature + anchor_embed
+        # 如果存在相机位置编码(camera embedding)，则引入相机相关信息
         if self.camera_encoder is not None:
+            # 将相机投影矩阵reshape后输入camera encoder得到camera embedding
             camera_embed = self.camera_encoder(
                 metas["projection_mat"][:, :, :3].reshape(
                     bs, self.num_cams, -1
                 )
             )
+            # 将相机位置编码(camera embedding)与feature融合，使每个query对不同相机有不同表示
             feature = feature[:, :, None] + camera_embed[:, None]
 
+        # 通过全连接层预测attention权重
         weights = (
             self.weights_fc(feature)
+            # reshape为(batch, anchor, ?, num_groups)
             .reshape(bs, num_anchor, -1, self.num_groups)
+            # 在采样点维度上做softmax归一化
             .softmax(dim=-2)
+            # 将权重reshape为完整的deformable attention结构
             .reshape(
                 bs,
                 num_anchor,
@@ -186,31 +196,43 @@ class DeformableFeatureAggregation(BaseModule):
                 self.num_groups,
             )
         )
+        # 如果在训练阶段并且启用了attention dropout
         if self.training and self.attn_drop > 0:
+            # 随机生成drop mask
             mask = torch.rand(
                 bs, num_anchor, self.num_cams, 1, self.num_pts, 1
             )
+            # 将mask移动到weights所在设备并转换为相同数据类型
             mask = mask.to(device=weights.device, dtype=weights.dtype)
+            # 对部分attention权重进行dropout并保持期望值不变
             weights = ((mask > self.attn_drop) * weights) / (
                 1 - self.attn_drop
             )
+        # 返回最终的attention权重
         return weights
 
     @staticmethod
+    # 将3D key points通过投影矩阵投影到图像平面得到2D坐标
     def project_points(key_points, projection_mat, image_wh=None):
+        # 获取batch size、anchor数量以及每个anchor的key point数量
         bs, num_anchor, num_pts = key_points.shape[:3]
 
+        # 在key points最后一维添加1，构成齐次坐标(x,y,z,1)
         pts_extend = torch.cat(
             [key_points, torch.ones_like(key_points[..., :1])], dim=-1
         )
+        # 使用投影矩阵将3D点从世界坐标系投影到相机图像平面
         points_2d = torch.matmul(
             projection_mat[:, :, None, None], pts_extend[:, None, ..., None]
         ).squeeze(-1)
+        # 通过除以深度z实现透视投影，将齐次坐标转换为二维像素坐标
         points_2d = points_2d[..., :2] / torch.clamp(
             points_2d[..., 2:3], min=1e-5
         )
+        # 如果提供了图像宽高信息，则将像素坐标归一化到[0,1]范围
         if image_wh is not None:
             points_2d = points_2d / image_wh[:, :, None, None]
+        # 返回最终的2D投影坐标
         return points_2d
 
     @staticmethod

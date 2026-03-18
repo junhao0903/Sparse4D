@@ -73,12 +73,16 @@ class Sparse4D(BaseDetector):
             feature_maps = self.img_backbone(img, num_cams, metas=metas)
         else:
             feature_maps = self.img_backbone(img)
+        # img [6*bs, 3, 256, 704]
+        # feature_maps [[6*bs, 256, 64, 176], [6*bs, 512, 32, 88], [6*bs, 1024, 16, 44], [6*bs, 2048, 8, 22]]
         if self.img_neck is not None:
             feature_maps = list(self.img_neck(feature_maps))
+            # feature_maps [[6*bs, 256, 64, 176], [6*bs, 256, 32, 88], [6*bs, 256, 16, 44], [6*bs, 256, 8, 22]]
         for i, feat in enumerate(feature_maps):
             feature_maps[i] = torch.reshape(
                 feat, (bs, num_cams) + feat.shape[1:]
             )
+        # feature_maps [[bs, 6, 256, 64, 176], [bs, 6, 256, 32, 88], [bs, 6, 256, 16, 44], [bs, 6, 256, 8, 22]]
         if return_depth and self.depth_branch is not None:
             depths = self.depth_branch(feature_maps, metas.get("focal"))
         else:

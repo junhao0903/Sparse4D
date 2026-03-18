@@ -70,83 +70,126 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         cls_target,
         box_target,
     ):
+        # 获取batch大小、预测query数量以及类别数
         bs, num_pred, num_cls = cls_pred.shape
 
+        # 计算分类匹配代价（预测类别与GT类别之间的cost）
         cls_cost = self._cls_cost(cls_pred, cls_target)
 
+        # 对GT box进行编码，使其与预测box格式一致
         box_target = self.encode_reg_target(box_target, box_pred.device)
 
+        # 初始化每个instance的回归权重
         instance_reg_weights = []
+        # 遍历batch中每个样本
         for i in range(len(box_target)):
+            # 对非NaN的回归目标赋权重1，NaN位置为0（无效位置）
             weights = torch.logical_not(box_target[i].isnan()).to(
                 dtype=box_target[i].dtype
             )
+            # 如果设置了类别相关的回归权重
             if self.cls_wise_reg_weights is not None:
+                # 遍历每个类别对应的权重
                 for cls, weight in self.cls_wise_reg_weights.items():
+                    # 将属于该类别的instance的权重替换为指定值
                     weights = torch.where(
                         (cls_target[i] == cls)[:, None],
                         weights.new_tensor(weight),
                         weights,
                     )
+            # 保存当前样本的回归权重
             instance_reg_weights.append(weights)
+        # 计算box回归匹配代价
         box_cost = self._box_cost(box_pred, box_target, instance_reg_weights)
 
+        # 初始化匹配结果索引
         indices = []
+        # 对batch中的每个样本进行匹配
         for i in range(bs):
+            # 如果分类和回归cost都存在
             if cls_cost[i] is not None and box_cost[i] is not None:
+                # 总cost为分类和回归cost之和，并转为numpy
                 cost = (cls_cost[i] + box_cost[i]).detach().cpu().numpy()
+                # 将无效值（inf或nan）替换为一个很大的数，避免影响匹配
                 cost = np.where(np.isneginf(cost) | np.isnan(cost), 1e8, cost)
+                # 使用匈牙利算法进行最优匹配
                 assign = linear_sum_assignment(cost)
+                # 将匹配结果转换为tensor保存
                 indices.append(
                     [cls_pred.new_tensor(x, dtype=torch.int64) for x in assign]
                 )
             else:
+                # 如果cost不存在，则标记为空
                 indices.append([None, None])
 
+        # 初始化输出分类target，默认设为背景类别（num_cls）
         output_cls_target = (
             cls_target[0].new_ones([bs, num_pred], dtype=torch.long) * num_cls
         )
+        # 初始化输出box target
         output_box_target = box_pred.new_zeros(box_pred.shape)
+        # 初始化回归权重
         output_reg_weights = box_pred.new_zeros(box_pred.shape)
+        # 根据匹配结果填充target
         for i, (pred_idx, target_idx) in enumerate(indices):
+            # 如果当前样本没有GT，则跳过
             if len(cls_target[i]) == 0:
                 continue
+            # 将匹配到的预测位置赋对应的类别标签
             output_cls_target[i, pred_idx] = cls_target[i][target_idx]
+            # 将匹配到的预测位置赋对应的box目标
             output_box_target[i, pred_idx] = box_target[i][target_idx]
+            # 将匹配到的预测位置赋对应的回归权重
             output_reg_weights[i, pred_idx] = instance_reg_weights[i][
                 target_idx
             ]
+        # 返回分类target、box target以及回归权重
         return output_cls_target, output_box_target, output_reg_weights
 
     def _cls_cost(self, cls_pred, cls_target):
+        # 获取batch大小
         bs = cls_pred.shape[0]
+        # 对分类预测做sigmoid得到概率
         cls_pred = cls_pred.sigmoid()
+        # 初始化cost列表
         cost = []
+        # 遍历batch中每个样本
         for i in range(bs):
+            # 如果当前样本存在GT
             if len(cls_target[i]) > 0:
+                # 计算负样本代价（focal loss中的负项）
                 neg_cost = (
                     -(1 - cls_pred[i] + self.eps).log()
                     * (1 - self.alpha)
                     * cls_pred[i].pow(self.gamma)
                 )
+                # 计算正样本代价（focal loss中的正项）
                 pos_cost = (
                     -(cls_pred[i] + self.eps).log()
                     * self.alpha
                     * (1 - cls_pred[i]).pow(self.gamma)
                 )
+                # 根据GT类别索引取对应类别的cost，并组合为最终分类cost
                 cost.append(
                     (pos_cost[:, cls_target[i]] - neg_cost[:, cls_target[i]])
                     * self.cls_weight
                 )
             else:
+                # 如果没有GT，则该样本cost为空
                 cost.append(None)
+        # 返回每个样本的分类cost
         return cost
 
     def _box_cost(self, box_pred, box_target, instance_reg_weights):
+        # 获取batch大小
         bs = box_pred.shape[0]
+        # 初始化cost列表
         cost = []
+        # 遍历batch中每个样本
         for i in range(bs):
+            # 如果当前样本存在GT box
             if len(box_target[i]) > 0:
+                # 计算预测box与GT box的L1距离，并加权
                 cost.append(
                     torch.sum(
                         torch.abs(box_pred[i, :, None] - box_target[i][None])
@@ -157,7 +200,9 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
                     * self.box_weight
                 )
             else:
+                # 如果没有GT，则该样本cost为空
                 cost.append(None)
+        # 返回每个样本的box cost
         return cost
 
     def get_dn_anchors(self, cls_target, box_target, gt_instance_id=None):

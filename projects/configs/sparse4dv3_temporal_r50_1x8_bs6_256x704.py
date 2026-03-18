@@ -60,8 +60,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 48
-num_gpus = 8
+total_batch_size = 1
+num_gpus = 1
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(28130 // (num_gpus * batch_size))
 num_epochs = 100
@@ -114,61 +114,143 @@ temporal = True
 decouple_attn = True
 with_quality_estimation = True
 
+# Sparse4D整体模型配置
 model = dict(
+# 模型类型：Sparse4D
+                     # Sparse4D是一种基于稀疏3D query的多视角3D检测框架
+                     # 核心思想：
+                     #   用少量3D anchor/query 在BEV空间中迭代更新，而不是构建稠密BEV feature
+                     # 优势：
+                     #   计算量小、推理速度快、精度高
     type="Sparse4D",
+    # 是否使用GridMask数据增强
+    # GridMask通过网格遮挡图像部分区域，增强模型鲁棒性
+    # 在自动驾驶中可以模拟：
+    #   雨滴、污渍、遮挡等情况
     use_grid_mask=True,
     use_deformable_func=use_deformable_func,
+    # 是否使用CUDA实现的deformable attention
+    # deformable attention用于高效从多尺度图像特征中采样
+    # ==============================
+    # 1. 图像Backbone
+    # ==============================
     img_backbone=dict(
+        # 使用ResNet作为特征提取 backbone
+        # ResNet优势：
+        #   结构成熟稳定
+        #   残差连接解决深层网络梯度消失
+        #   在检测任务中表现稳定
         type="ResNet",
+        # ResNet50
+        # 在精度和计算量之间平衡
         depth=50,
+        # ResNet共有4个stage
         num_stages=4,
         frozen_stages=-1,
+        # 不冻结任何层
+        # 表示全部参与训练
         norm_eval=False,
+        # BN在训练时更新统计量
+        # pytorch风格ResNet
         style="pytorch",
         with_cp=True,
+        # checkpoint机制
+        # 减少显存使用（用计算换显存）
         out_indices=(0, 1, 2, 3),
+        # 输出4个stage特征
+        # 用于FPN构建多尺度特征
         norm_cfg=dict(type="BN", requires_grad=True),
+        # BatchNorm
+        # 在视觉任务中BN稳定且高效
         pretrained="ckpt/resnet50-19c8e357.pth",
+        # 使用ImageNet预训练模型
+        # 可以加快收敛并提高精度
     ),
+    # ==============================
+    # 2. FPN特征金字塔
+    # ==============================
     img_neck=dict(
         type="FPN",
+        # FPN：Feature Pyramid Network
+        # 作用：
+        #   融合不同尺度的特征
+        #   提供多尺度检测能力
         num_outs=num_levels,
+        # 输出feature level数量
         start_level=0,
+        # 从第0层开始
         out_channels=embed_dims,
+        # 所有输出统一通道数
         add_extra_convs="on_output",
+        # 在输出上额外添加卷积层
+        # 用于生成更深层特征
         relu_before_extra_convs=True,
         in_channels=[256, 512, 1024, 2048],
+        # ResNet四个stage的输出通道
     ),
+    # ==============================
+    # 3. 深度辅助分支
+    # ==============================
     depth_branch=dict(  # for auxiliary supervision only
         type="DenseDepthNet",
         embed_dims=embed_dims,
         num_depth_layers=num_depth_layers,
         loss_weight=0.2,
+        # 深度监督loss权重
+        # 作用：
+        #   通过深度学习提升3D几何理解
+        #   提高3D检测精度
     ),
+    # ==============================
+    # 4. Sparse4D Head
+    # ==============================
     head=dict(
         type="Sparse4DHead",
         cls_threshold_to_reg=0.05,
+        # 只有分类分数超过该阈值才进行回归更新
+        # 降低无效计算
         decouple_attn=decouple_attn,
+        # 是否解耦attention
+        # 解耦后分类和回归特征分别建模
+        # ==============================
+        # 4.1 Instance Bank
+        # ==============================
         instance_bank=dict(
             type="InstanceBank",
             num_anchor=900,
+            # query数量
+            # Sparse4D使用900个3D anchor作为初始query
             embed_dims=embed_dims,
             anchor="nuscenes_kmeans900.npy",
+            # anchor来自NuScenes数据集KMeans聚类
+            # 提供更好的初始分布
             anchor_handler=dict(type="SparseBox3DKeyPointsGenerator"),
             num_temp_instances=600 if temporal else -1,
+            # temporal模式下保留历史instance
             confidence_decay=0.6,
+            # 历史instance置信度衰减
             feat_grad=False,
+            # instance feature不回传梯度
         ),
+        # ==============================
+        # 4.2 Anchor Encoder
+        # ==============================
         anchor_encoder=dict(
             type="SparseBox3DEncoder",
+            # 将3D anchor编码为embedding
             vel_dims=3,
+            # 速度维度
             embed_dims=[128, 32, 32, 64] if decouple_attn else 256,
             mode="cat" if decouple_attn else "add",
+            # 特征融合方式
             output_fc=not decouple_attn,
             in_loops=1,
             out_loops=4 if decouple_attn else 2,
         ),
         num_single_frame_decoder=num_single_frame_decoder,
+        # ==============================
+        # 4.3 Decoder结构
+        # ==============================
         operation_order=(
             [
                 "gnn",
@@ -180,6 +262,7 @@ model = dict(
             ]
             * num_single_frame_decoder
             + [
+                # 时序attention
                 "temp_gnn",
                 "gnn",
                 "norm",
@@ -190,8 +273,13 @@ model = dict(
             ]
             * (num_decoder - num_single_frame_decoder)
         )[2:],
+        # ==============================
+        # 4.4 Temporal Attention
+        # ==============================
         temp_graph_model=dict(
             type="MultiheadAttention",
+            # Transformer多头注意力
+            # 用于建模时序信息
             embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
             num_heads=num_groups,
             batch_first=True,
@@ -199,37 +287,60 @@ model = dict(
         )
         if temporal
         else None,
+        # ==============================
+        # 4.5 Instance Attention
+        # ==============================
         graph_model=dict(
             type="MultiheadAttention",
+            # instance之间关系建模
             embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
             num_heads=num_groups,
             batch_first=True,
             dropout=drop_out,
         ),
+        # ==============================
+        # 4.6 LayerNorm
+        # ==============================
+        # Transformer中常用LN
+        # 比BN更适合sequence建模
         norm_layer=dict(type="LN", normalized_shape=embed_dims),
+        # ==============================
+        # 4.7 FeedForward Network
+        # ==============================
         ffn=dict(
             type="AsymmetricFFN",
             in_channels=embed_dims * 2,
             pre_norm=dict(type="LN"),
             embed_dims=embed_dims,
             feedforward_channels=embed_dims * 4,
+            # Transformer经典配置
             num_fcs=2,
             ffn_drop=drop_out,
             act_cfg=dict(type="ReLU", inplace=True),
         ),
+        # ==============================
+        # 4.8 Deformable Feature Aggregation
+        # ==============================
         deformable_model=dict(
             type="DeformableFeatureAggregation",
+            # 核心模块：
+            # 从多相机多尺度特征中采样
             embed_dims=embed_dims,
             num_groups=num_groups,
             num_levels=num_levels,
+            # FPN层数
             num_cams=6,
+            # NuScenes六个相机
             attn_drop=0.15,
             use_deformable_func=use_deformable_func,
             use_camera_embed=True,
+            # 加入camera embedding
+            # 帮助区分不同相机
             residual_mode="cat",
             kps_generator=dict(
                 type="SparseBox3DKeyPointsGenerator",
                 num_learnable_pts=6,
+                # 每个3D box采样6个关键点
                 fix_scale=[
                     [0, 0, 0],
                     [0.45, 0, 0],
@@ -241,16 +352,24 @@ model = dict(
                 ],
             ),
         ),
+        # ==============================
+        # 4.9 Box Refinement
+        # ==============================
         refine_layer=dict(
             type="SparseBox3DRefinementModule",
             embed_dims=embed_dims,
             num_cls=num_classes,
             refine_yaw=True,
+            # 细化box朝向
             with_quality_estimation=with_quality_estimation,
         ),
+        # ==============================
+        # 4.10 Target Sampler
+        # ==============================
         sampler=dict(
             type="SparseBox3DTarget",
             num_dn_groups=5,
+            # denoising训练
             num_temp_dn_groups=3,
             dn_noise_scale=[2.0] * 3 + [0.5] * 7,
             max_dn_gt=32,
@@ -273,20 +392,34 @@ model = dict(
                 ],
             },
         ),
+        # ==============================
+        # 4.11 分类Loss
+        # ==============================
         loss_cls=dict(
             type="FocalLoss",
+            # FocalLoss适合检测任务
+            # 解决前景背景不平衡
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
             loss_weight=2.0,
         ),
+        # ==============================
+        # 4.12 回归Loss
+        # ==============================
         loss_reg=dict(
             type="SparseBox3DLoss",
             loss_box=dict(type="L1Loss", loss_weight=0.25),
+            # box回归使用L1
             loss_centerness=dict(type="CrossEntropyLoss", use_sigmoid=True),
             loss_yawness=dict(type="GaussianFocalLoss"),
             cls_allow_reverse=[class_names.index("barrier")],
         ),
+
+        # ==============================
+        # 4.13 Decoder
+        # ==============================
+        # 将embedding解码为最终3D box
         decoder=dict(type="SparseBox3DDecoder"),
         reg_weights=[2.0] * 3 + [1.0] * 7,
     ),

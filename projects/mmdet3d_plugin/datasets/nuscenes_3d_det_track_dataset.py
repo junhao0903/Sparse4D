@@ -192,14 +192,22 @@ class NuScenes3DDetTrackDataset(Dataset):
                 self.flag = np.array(new_flags, dtype=np.int64)
 
     def get_augmentation(self):
+        # 如果没有配置数据增强参数，则不进行增强
         if self.data_aug_conf is None:
             return None
+        # 原始图像的高度和宽度
         H, W = self.data_aug_conf["H"], self.data_aug_conf["W"]
+        # 网络最终输入的图像尺寸
         fH, fW = self.data_aug_conf["final_dim"]
+        # ---------------- 训练阶段的数据增强 ----------------
         if not self.test_mode:
+            # 在 resize_lim 范围内随机采样缩放比例
             resize = np.random.uniform(*self.data_aug_conf["resize_lim"])
+            # 根据缩放比例计算缩放后的图像尺寸
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
+            # 随机决定裁剪区域的上边界
+            # bot_pct_lim 控制从图像底部裁掉多少比例（常用于去掉天空部分）
             crop_h = (
                 int(
                     (1 - np.random.uniform(*self.data_aug_conf["bot_pct_lim"]))
@@ -207,34 +215,51 @@ class NuScenes3DDetTrackDataset(Dataset):
                 )
                 - fH
             )
+            # 在水平方向随机选择裁剪起点
             crop_w = int(np.random.uniform(0, max(0, newW - fW)))
+            # 定义裁剪区域 (left, top, right, bottom)
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            # 默认不翻转
             flip = False
+            # 如果允许随机翻转，则以 50% 概率进行水平翻转
             if self.data_aug_conf["rand_flip"] and np.random.choice([0, 1]):
                 flip = True
+            # 随机采样2D旋转角度（用于图像旋转增强）
             rotate = np.random.uniform(*self.data_aug_conf["rot_lim"])
+            # 随机采样3D旋转角度（通常用于BEV空间的旋转增强）
             rotate_3d = np.random.uniform(*self.data_aug_conf["rot3d_range"])
+        # ---------------- 测试阶段（不做随机增强） ----------------
         else:
+            # 根据最终输入尺寸计算一个固定的缩放比例
             resize = max(fH / H, fW / W)
+            # 计算resize后的图像尺寸
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
+            # 使用 bot_pct_lim 的平均值来确定裁剪高度（保证测试稳定）
             crop_h = (
                 int((1 - np.mean(self.data_aug_conf["bot_pct_lim"])) * newH)
                 - fH
             )
+            # 水平方向居中裁剪
             crop_w = int(max(0, newW - fW) / 2)
+            # 定义裁剪区域
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            # 测试阶段不进行翻转
             flip = False
+            # 测试阶段不进行2D旋转
             rotate = 0
+            # 测试阶段不进行3D旋转
             rotate_3d = 0
+        # 将所有增强参数打包为一个字典
         aug_config = {
-            "resize": resize,
-            "resize_dims": resize_dims,
-            "crop": crop,
-            "flip": flip,
-            "rotate": rotate,
-            "rotate_3d": rotate_3d,
+            "resize": resize,  # 缩放比例
+            "resize_dims": resize_dims,  # 缩放后的图像尺寸
+            "crop": crop,  # 裁剪区域
+            "flip": flip,  # 是否水平翻转
+            "rotate": rotate,  # 图像2D旋转角度
+            "rotate_3d": rotate_3d,  # BEV空间3D旋转角度
         }
+        # 返回增强配置
         return aug_config
 
     def __getitem__(self, idx):
@@ -296,32 +321,53 @@ class NuScenes3DDetTrackDataset(Dataset):
         ego2global[:3, 3] = np.array(info["ego2global_translation"])
         input_dict["lidar2global"] = ego2global @ lidar2ego
 
+        # 如果当前数据模态中使用相机数据
         if self.modality["use_camera"]:
-            image_paths = []
-            lidar2img_rts = []
-            cam_intrinsic = []
+            image_paths = []  # 用于存储所有相机图像路径
+            lidar2img_rts = []  # 用于存储每个相机的 lidar→image 投影矩阵
+            cam_intrinsic = []  # 用于存储每个相机的内参矩阵
+
+            # 遍历当前 sample 中的所有相机
             for cam_type, cam_info in info["cams"].items():
+                # 记录该相机图像文件路径
                 image_paths.append(cam_info["data_path"])
-                # obtain lidar to image transformation matrix
+
+                # -------- 计算 lidar → camera 的外参 --------
+                # 已知的是 camera → lidar 的旋转矩阵(sensor2lidar_rotation)
+                # 因此通过求逆得到 lidar → camera 的旋转矩阵
                 lidar2cam_r = np.linalg.inv(cam_info["sensor2lidar_rotation"])
+
+                # 根据 camera→lidar 的平移推导 lidar→camera 的平移
                 lidar2cam_t = (
                     cam_info["sensor2lidar_translation"] @ lidar2cam_r.T
                 )
+                # 构造 4×4 的 lidar→camera 齐次变换矩阵
                 lidar2cam_rt = np.eye(4)
+                # 填入旋转部分
                 lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                # 填入平移部分（注意这里使用的是行向量坐标表示方式）
                 lidar2cam_rt[3, :3] = -lidar2cam_t
+                # -------- 处理相机内参 --------
+                # 深拷贝相机内参矩阵，避免后续修改影响原数据
                 intrinsic = copy.deepcopy(cam_info["cam_intrinsic"])
+                # 保存当前相机内参
                 cam_intrinsic.append(intrinsic)
+                # 构造 4×4 的相机内参矩阵（将 3×3 intrinsic padding 成 4×4）
                 viewpad = np.eye(4)
+                # 将 intrinsic 填入 viewpad 左上角
                 viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic
+                # -------- 计算 lidar → image 的投影矩阵 --------
+                # lidar→image = intrinsic × lidar→camera
                 lidar2img_rt = viewpad @ lidar2cam_rt.T
+                # 保存该相机的 lidar→image 投影矩阵
                 lidar2img_rts.append(lidar2img_rt)
 
+            # 将图像路径、lidar→image矩阵、相机内参加入输入字典
             input_dict.update(
                 dict(
-                    img_filename=image_paths,
-                    lidar2img=lidar2img_rts,
-                    cam_intrinsic=cam_intrinsic,
+                    img_filename=image_paths,  # 所有相机图像路径
+                    lidar2img=lidar2img_rts,  # lidar到各相机图像平面的投影矩阵
+                    cam_intrinsic=cam_intrinsic  # 各相机的内参矩阵
                 )
             )
 
@@ -602,43 +648,62 @@ class NuScenes3DDetTrackDataset(Dataset):
         return results_dict
 
     def show(self, results, save_dir=None, show=False, pipeline=None):
+        # 如果未指定保存路径，则默认使用当前目录
         save_dir = "./" if save_dir is None else save_dir
+        # 在保存路径下创建visual子目录
         save_dir = os.path.join(save_dir, "visual")
+        # 打印保存路径
         print_log(os.path.abspath(save_dir))
+        # 构建数据处理pipeline
         pipeline = Compose(pipeline)
+        # 如果目录不存在则创建
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
 
+        # 定义视频编码格式
         fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        # 初始化视频写入器
         videoWriter = None
 
+        # 遍历每一帧的检测结果
         for i, result in enumerate(results):
+            # 如果结果中包含img_bbox字段，则取其内容
             if "img_bbox" in result.keys():
                 result = result["img_bbox"]
+            # 获取当前帧的数据并通过pipeline处理
             data_info = pipeline(self.get_data_info(i))
+            # 初始化图像列表
             imgs = []
 
+            # 获取原始多视角图像
             raw_imgs = data_info["img"]
+            # 获取lidar到图像的投影矩阵
             lidar2img = data_info["img_metas"].data["lidar2img"]
+            # 根据score阈值筛选预测3D框
             pred_bboxes_3d = result["boxes_3d"][
                 result["scores_3d"] > self.vis_score_threshold
             ]
+            # 如果是tracking任务，根据instance id设置颜色
             if "instance_ids" in result and self.tracking:
                 color = []
                 for id in result["instance_ids"].cpu().numpy().tolist():
                     color.append(
                         self.ID_COLOR_MAP[int(id % len(self.ID_COLOR_MAP))]
                     )
+            # 如果是检测任务，根据类别标签设置颜色
             elif "labels_3d" in result:
                 color = []
                 for id in result["labels_3d"].cpu().numpy().tolist():
                     color.append(self.ID_COLOR_MAP[id])
+            # 如果没有类别信息，则使用默认颜色
             else:
                 color = (255, 0, 0)
 
             # ===== draw boxes_3d to images =====
             for j, img_origin in enumerate(raw_imgs):
+                # 拷贝原始图像
                 img = img_origin.copy()
+                # 如果存在预测框，则进行绘制
                 if len(pred_bboxes_3d) != 0:
                     img = draw_lidar_bbox3d_on_img(
                         pred_bboxes_3d,
@@ -648,6 +713,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                         color=color,
                         thickness=3,
                     )
+                # 保存绘制后的图像
                 imgs.append(img)
 
             # ===== draw boxes_3d to BEV =====
@@ -668,6 +734,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     "rear right",
                 ]
             ):
+                # 在图像左上角画白色背景框
                 imgs[j] = cv2.rectangle(
                     imgs[j],
                     (0, 0),
@@ -675,10 +742,13 @@ class NuScenes3DDetTrackDataset(Dataset):
                     color=(255, 255, 255),
                     thickness=-1,
                 )
+                # 计算文字大小
                 w, h = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 2, 2)[0]
+                # 计算文字绘制位置（居中）
                 text_x = int(220 - w / 2)
                 text_y = int(40 + h / 2)
 
+                # 在图像上绘制相机名称
                 imgs[j] = cv2.putText(
                     imgs[j],
                     name,
@@ -689,6 +759,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     2,
                     cv2.LINE_AA,
                 )
+            # 将6个相机视角拼接成2行3列
             image = np.concatenate(
                 [
                     np.concatenate([imgs[2], imgs[0], imgs[1]], axis=1),
@@ -696,6 +767,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 ],
                 axis=0,
             )
+            # 将BEV图拼接到右侧
             image = np.concatenate([image, bev], axis=1)
 
             # ===== save video =====
@@ -706,8 +778,11 @@ class NuScenes3DDetTrackDataset(Dataset):
                     7,
                     image.shape[:2][::-1],
                 )
+            # 保存当前帧为图片
             cv2.imwrite(os.path.join(save_dir, f"{i}.jpg"), image)
+            # 写入视频帧
             videoWriter.write(image)
+        # 释放视频写入器
         videoWriter.release()
 
 
