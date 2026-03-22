@@ -5,7 +5,22 @@ import numpy as np
 import torch
 
 from projects.mmdet3d_plugin.core.box3d import *
-
+import csv
+def readcsv(filename, read_header=False):
+    '''
+    读取csv内的数据
+    '''
+    csv_datas = dict()
+    with open(filename, "r") as csvfile:
+        csvreader = csv.reader(csvfile)
+        # 遍历csvreader对象的每一行内容并输出
+        is_header = True  # 第一行表头不要
+        for row in csvreader:
+            if not read_header and is_header:
+                is_header = False
+                continue
+            csv_datas[row[0]] = row[1]
+    return csv_datas
 
 def box3d_to_corners(box3d):
     if isinstance(box3d, torch.Tensor):
