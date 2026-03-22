@@ -851,12 +851,16 @@ class CywSparseDataset(Dataset):
                 result["scores_3d"] > self.vis_score_threshold
                 ]
             # 如果是tracking任务，根据instance id设置颜色
+            pred_ids = None
             if "instance_ids" in result and self.tracking:
                 color = []
                 for id in result["instance_ids"].cpu().numpy().tolist():
                     color.append(
                         self.ID_COLOR_MAP[int(id % len(self.ID_COLOR_MAP))]
                     )
+                pred_ids = result["instance_ids"][
+                result["scores_3d"] > self.vis_score_threshold
+                ]
             # 如果是检测任务，根据类别标签设置颜色
             elif "labels_3d" in result:
                 color = []
@@ -879,6 +883,7 @@ class CywSparseDataset(Dataset):
                         img_metas=None,
                         color=color,
                         thickness=3,
+                        ids=pred_ids
                     )
                 # 保存绘制后的图像
                 imgs.append(img)

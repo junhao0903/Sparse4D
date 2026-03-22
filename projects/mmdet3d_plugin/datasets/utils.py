@@ -45,7 +45,7 @@ def box3d_to_corners(box3d):
 
 
 def plot_rect3d_on_img(
-    img, num_rects, rect_corners, color=(0, 255, 0), thickness=1
+    img, num_rects, rect_corners, color=(0, 255, 0), thickness=1, ids=None
 ):
     """Plot the boundary lines of 3D rectangular on 2D images.
 
@@ -84,30 +84,61 @@ def plot_rect3d_on_img(
                 or (corners[end, 0] >= w or corners[end, 0] < 0)
             ):
                 continue
-            if isinstance(color[0], int):
-                cv2.line(
-                    img,
-                    (corners[start, 0], corners[start, 1]),
-                    (corners[end, 0], corners[end, 1]),
-                    color,
-                    thickness,
-                    cv2.LINE_AA,
-                )
-            else:
-                cv2.line(
-                    img,
-                    (corners[start, 0], corners[start, 1]),
-                    (corners[end, 0], corners[end, 1]),
-                    color[i],
-                    thickness,
-                    cv2.LINE_AA,
-                )
+
+            c = color if isinstance(color[0], int) else color[i]
+
+            cv2.line(
+                img,
+                (corners[start, 0], corners[start, 1]),
+                (corners[end, 0], corners[end, 1]),
+                c,
+                thickness,
+                cv2.LINE_AA,
+            )
+
+        # ===== 2️⃣ 画ID（新增）=====
+        if ids is not None:
+            id_val = ids[i].item()  # tensor → int
+
+            # ===== 1️⃣ bbox尺寸 =====
+            x_min = np.min(corners[:, 0])
+            x_max = np.max(corners[:, 0])
+            y_min = np.min(corners[:, 1])
+            y_max = np.max(corners[:, 1])
+
+            bbox_w = x_max - x_min
+            bbox_h = y_max - y_min
+
+            # ===== 2️⃣ 动态字体 =====
+            scale = max(bbox_w, bbox_h) / 200.0
+            font_scale = np.clip(scale, 1.0, 2.0)
+
+            thickness_text = max(1, int(font_scale * 2))
+
+            # ===== 3️⃣ 放在bbox顶部 =====
+            x = int(x_min)
+            y = int(y_min) - 5
+
+            # 防止越界
+            y = max(0, y)
+
+            # ===== 4️⃣ 画文字 =====
+            cv2.putText(
+                img,
+                f"{id_val}",
+                (x, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (0, 255, 255),
+                thickness_text,
+                cv2.LINE_AA,
+            )
 
     return img.astype(np.uint8)
 
 
 def draw_lidar_bbox3d_on_img(
-    bboxes3d, raw_img, lidar2img_rt, img_metas=None, color=(0, 255, 0), thickness=1
+    bboxes3d, raw_img, lidar2img_rt, img_metas=None, color=(0, 255, 0), thickness=1, ids=None
 ):
     """Project the 3D bbox on 2D plane and draw on input image.
 
@@ -139,7 +170,7 @@ def draw_lidar_bbox3d_on_img(
     pts_2d[:, 1] /= pts_2d[:, 2]
     imgfov_pts_2d = pts_2d[..., :2].reshape(num_bbox, 8, 2)
 
-    return plot_rect3d_on_img(img, num_bbox, imgfov_pts_2d, color, thickness)
+    return plot_rect3d_on_img(img, num_bbox, imgfov_pts_2d, color, thickness, ids)
 
 
 def draw_points_on_img(points, img, lidar2img_rt, color=(0, 255, 0), circle=4):
